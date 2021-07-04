@@ -1,11 +1,12 @@
 """
 Author: Andres F Silva
 Date: June 2021
-Description:
+Description: Create a dashboard with common visualizations and test for
+better understanding of time series and LSTM models built with keras
 """
 
 import ipywidgets as widgets
-from ipywidgets import VBox, HBox, Label, Layout, Output, AppLayout, Tab
+from ipywidgets import VBox, HBox, Label, Layout, Output, AppLayout, Tab, Image
 import pandas as pd
 import numpy as np
 from bqplot import pyplot as plt
@@ -23,7 +24,8 @@ from tensorflow.keras.layers import LSTM
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics import mean_absolute_error
-
+import json
+from drawModel import drawModel
 
 warnings.filterwarnings("ignore")
 
@@ -54,13 +56,18 @@ plotHistoryOutput = Output()
 plotModelResultsOutput = Output()
 outErrorMetrics = Output()
 plotModelFuturePredictions = Output()
+outputDraw = Output()
+userModel = None
 
-def dashboardTS(data, option="dashboard"):
+def dashboardTS(data, option="dashboard", model=None):
     """
     Principal function to return a dashboard or an applayout
     """
     global commonData 
     commonData = data
+    if model is not None:
+        global userModel
+        userModel = model
     if option == "dashboard":
         ddData = widgets.Dropdown(name = "dropData", description="Year", options = uniqueSortedValuesPlusAll(np.array(data.index.year)))
         ddInterpolate = widgets.Dropdown(name = "ddInterp", description="Interpolate", options = ['None', 'linear','time','index','values','pad','nearest', 'zero', 'slinear', 'quadratic', 'cubic', 'spline',
@@ -129,8 +136,10 @@ def dashboardTS(data, option="dashboard"):
         ddCompileOptimizer = widgets.Dropdown(name = "ddCompileOptimizer", description="Optimizer", options = ['adam'])
         
         #Observers
-        ddCompileLoss.observe(DropdownListenerModel, names='value')
-        ddCompileOptimizer.observe(DropdownListenerModel, names='value')
+        ddCompileLoss.observe(controlsListenerModel, names='value')
+        ddCompileOptimizer.observe(controlsListenerModel, names='value')
+        trainSlider.observe(controlsListenerModel, 'value')
+        lookBackSlider.observe(controlsListenerModel, 'value')
 
         #Register controls Model
         widgetsRegister('trainSlider', trainSlider)
@@ -149,7 +158,13 @@ def dashboardTS(data, option="dashboard"):
         #Config for tensorflow
         gpu_devices = tf.config.experimental.list_physical_devices("GPU")
         for device in gpu_devices:
-            tf.config.experimental.set_memory_growth(device, True)
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+            except:
+                # Invalid device or cannot modify virtual devices once initialized.
+                pass
+
+            
 
         FirstTab()
         SecondTab()
@@ -178,8 +193,9 @@ def dashboardTS(data, option="dashboard"):
 
         tabFourth = AppLayout(header=head,
           left_sidebar=VBox([plotHistoryOutput,outErrorMetrics]),
-          center=plotModelResultsOutput,
+          center=VBox([plotModelResultsOutput, outputDraw]),
           right_sidebar=None,
+          pane_heights=[1, 10, 1],
           pane_widths=[2, 10, 0])
         
 
@@ -228,6 +244,16 @@ def uniqueSortedValuesPlusAll(listOfValues):
     unique.sort()
     unique.insert(0, 'All')
     return unique
+
+def changeModelInput(modelJSON, inputShape):
+    modelJSON = json.loads(modelJSON)
+    previousInputShape = None
+    if modelJSON['config']['layers'][0]['class_name'] == 'InputLayer':
+        previousInputShape = modelJSON['config']['layers'][0]['config']['batch_input_shape']
+        modelJSON['config']['layers'][0]['config']['batch_input_shape'] = inputShape
+    if modelJSON['config']['layers'][1]['class_name'] == 'LSTM' and modelJSON['config']['layers'][0]['config']['batch_input_shape'] == previousInputShape:
+        modelJSON['config']['layers'][0]['config']['batch_input_shape'] = inputShape
+    return json.dumps(modelJSON)
 
 def FirstTab():
     """Get the values of controls and process"""
@@ -402,7 +428,7 @@ def drawTests(adfTest, kpssTest):
             plt.scatter(x=x, y=acf, marker='circle', colors=['Green'])
 
 
-            figure6 = plt.figure(title='Partial Correlation', animation_duration=100, layout=fig_layout, fig_margin = fig_marg)
+            figure6 = plt.figure(title='Partial Autocorrelation', animation_duration=100, layout=fig_layout, fig_margin = fig_marg)
             pacf, ci = sm.tsa.pacf(commonData, alpha=0.05)
             x = getEnumerationFromArray(pacf)
             plt.scatter(x=x, y=pacf, marker='circle', colors=['Green'])
@@ -435,7 +461,8 @@ def fourthTab(modelProvided=None):
     plotHistoryOutput.clear_output()
     plotModelResultsOutput.clear_output()
     outErrorMetrics.clear_output()
-    
+    outputDraw.clear_output()
+
     #Load dashboard features
     trainSlider = ctrls.loc[ctrls['uuid'].isin(['trainSlider'])]['value']
     #validSlider = ctrls.loc[ctrls['uuid'].isin(['validSlider'])]['value']
@@ -468,7 +495,8 @@ def fourthTab(modelProvided=None):
         
         model = None
         if modelProvided != None:
-            model = modelProvided
+            newInputShape = [None, 1, lookB]
+            model = keras.models.model_from_json(changeModelInput(modelProvided.to_json(), newInputShape))
         else:
             # Red LSTM
             model = keras.Sequential()
@@ -479,6 +507,9 @@ def fourthTab(modelProvided=None):
         liveTrainingLoss = []
         with plotHistoryOutput:
             display(HBox([Label(value="Entrenando modelo")]))
+        with outputDraw:
+            display(HBox([Label(value="Dibujando la red")]))
+        drawModel(model)
         history = model.fit(trainX, trainY, epochs=10, batch_size=1, verbose=2, callbacks=[myCallback])
         trainPredict = model.predict(trainX)
         testPredict = model.predict(testX)
@@ -490,6 +521,7 @@ def fourthTab(modelProvided=None):
         
     drawModelHistory(history, live=False)
     drawModelResults(commonData, trainPredict, testPredict, lookB, commonScaler)
+    getDrawingModel(model)
 
 def drawModelHistory(history, live=True):
     plotHistoryOutput.clear_output()
@@ -534,6 +566,13 @@ def drawModelResults(data, trainPredict, testPredict, lookBack, commonScaler):
     with plotModelFuturePredictions:
         figure = plt.figure(title='Real VS Predictions', animation_duration=100, figsize=(16,8))
 
+def getDrawingModel(model):
+    outputDraw.clear_output()
+    with outputDraw:
+        file = open("network.gv.png", "rb")
+        image = file.read()        
+        display(Image(value=image, format='png', width=400, height=200,))
+
 #Listeners and controls
 #First Tab
 def DropdownListener(change):
@@ -563,10 +602,10 @@ def TestListener(change):
     ThirdTab()
 
 #Fourth tab
-def DropdownListenerModel(change):
+def controlsListenerModel(change):
     result = getOptionsControl(change.owner)
     updateRegisterValue(result, change.new)
-    fourthTab()
+
 
 #Refresh tab
 def refreshSecondTab(b):
@@ -576,7 +615,8 @@ def refreshThirdTab(b):
     ThirdTab()
 
 def refreshFourthTab(b):
-    fourthTab()
+    global userModel
+    fourthTab(userModel)
 
 #********************************************** model custom functions 
 class MyCallback(keras.callbacks.Callback):
